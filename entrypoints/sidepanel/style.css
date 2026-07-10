@@ -14,6 +14,11 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: var(--text-primary);
@@ -21,10 +26,15 @@ body {
   font-size: 13px;
 }
 
+/* Fixed to the viewport height (the side panel *is* the viewport -- there's no
+   surrounding browser chrome to scroll) with the form area as the one
+   scrolling region inside it. This is what lets .panel-footer stay pinned to
+   the bottom instead of scrolling away under a long form. */
 .panel {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .panel-header {
@@ -72,6 +82,18 @@ body {
 .panel-body {
   padding: 16px;
   flex: 1;
+  overflow-y: auto;
+  /* Without this, a flex child's default min-height:auto refuses to shrink
+     below its content size, which defeats overflow-y:auto entirely -- the
+     panel would just grow past the viewport instead of scrolling internally. */
+  min-height: 0;
+}
+
+.panel-footer {
+  flex-shrink: 0;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+  background: #fbfbfa;
 }
 
 .login-wrap {
@@ -79,19 +101,18 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* .panel is now a fixed-height, clipped flex container (see above, for the
+     capture form's sticky footer) -- this is the login screen's one content
+     region, so it needs the same "flex:1 + scroll internally" treatment or a
+     long seed-user list would just get clipped instead of scrolling. */
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .login-mark {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  background: var(--gl-green);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 800;
-  font-size: 17px;
+  width: 46px;
+  height: 46px;
   margin-bottom: 12px;
 }
 
@@ -121,9 +142,14 @@ body {
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   margin-bottom: 5px;
   display: block;
+}
+
+.char-count {
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .field-input,
@@ -235,6 +261,22 @@ body {
   font-size: 10px;
 }
 
+.photo-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.photo-preview {
+  width: 100%;
+  max-height: 140px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+
 .thumb-row {
   display: flex;
   gap: 10px;
@@ -252,6 +294,9 @@ body {
   border-radius: 7px;
   background: #d9e8c8;
   flex-shrink: 0;
+  /* Only affects the <img> variant (an actual photo thumbnail) -- harmless on
+     the plain placeholder <div> used when nothing's attached yet. */
+  object-fit: cover;
 }
 
 .thumb-info {
@@ -296,7 +341,11 @@ body {
   font-size: 12px;
   color: var(--text-secondary);
   font-style: italic;
-  margin-bottom: 12px;
+  /* Fixed rather than max-height -- long captures (a whole page's worth of
+     text, in practice) were crowding the rest of the form out of view. */
+  height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
 }
 
 .type-chips {
@@ -312,7 +361,8 @@ body {
   font-size: 11.5px;
   color: var(--text-secondary);
   background: #fff;
-  cursor: default;
+  cursor: pointer;
+  user-select: none;
 }
 
 .type-chip.active {
@@ -322,9 +372,103 @@ body {
   font-weight: 700;
 }
 
-.type-chip.disabled {
+.tab-row {
+  display: flex;
+  gap: 2px;
+  padding: 8px 15px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  padding: 8px 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tab-btn.active {
+  color: var(--gl-green-dark);
+  border-bottom-color: var(--gl-green);
+}
+
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.queue-count {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.queue-row {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 10px;
+}
+
+.queue-row-main {
+  margin-bottom: 8px;
+}
+
+.queue-kind-badge {
+  margin-bottom: 6px;
+}
+
+.queue-row-desc {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.queue-row-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-approve,
+.btn-discard {
+  flex: 1;
+  border-radius: 7px;
+  padding: 7px;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-approve {
+  background: var(--gl-green-dark);
+  border: none;
+  color: #fff;
+}
+
+.btn-discard {
+  background: #fff;
+  border: 1px solid var(--border);
+  color: var(--danger);
+}
+
+.btn-approve:disabled,
+.btn-discard:disabled {
   opacity: 0.55;
+  cursor: default;
 }
 
 .success-wrap {
@@ -359,4 +503,38 @@ body {
   font-size: 11.5px;
   color: var(--text-muted);
   margin: 0 0 20px;
+}
+
+/* Quill (Long description) restyled to match the rest of the form -- same
+   border color/radius/font as .field-input, just with a toolbar and taller
+   editing area instead of a plain textarea. */
+.rich-text-wrap .ql-toolbar.ql-snow {
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: #fff;
+  padding: 6px 8px;
+}
+
+.rich-text-wrap .ql-container.ql-snow {
+  border: 1px solid var(--border);
+  border-radius: 0 0 7px 7px;
+  font-family: inherit;
+  font-size: 12.5px;
+  background: #fff;
+}
+
+.rich-text-wrap .ql-editor {
+  min-height: 180px;
+  padding: 8px 9px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: #fff;
+}
+
+.rich-text-wrap .ql-editor.ql-blank::before {
+  color: var(--text-muted);
+  font-style: normal;
+  left: 9px;
+  right: 9px;
 }

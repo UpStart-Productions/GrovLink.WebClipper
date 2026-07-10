@@ -1,39 +1,144 @@
 import { API_BASE } from './config';
 import { getDevCreds } from './devAuth';
+import { CONTENT_BASE_PATH, CONTENT_KINDS, CONTENT_LIST_KEY, ContentKind } from './contentTypes';
 
-async function authHeaders(): Promise<Record<string, string>> {
+async function authHeadersRaw(): Promise<Record<string, string>> {
   const creds = await getDevCreds();
   if (!creds) throw new Error('Not signed in yet.');
   return {
-    'content-type': 'application/json',
     'x-user-email': creds.email,
     'x-customer-slug': creds.customerSlug,
     'x-tenant-slug': creds.tenantSlug,
   };
 }
 
-export interface CreateEventInput {
-  title: string;
-  shortDescription?: string;
-  startDate: string;
-  endDate: string;
-  isActive?: boolean;
+async function authHeaders(): Promise<Record<string, string>> {
+  return { ...(await authHeadersRaw()), 'content-type': 'application/json' };
 }
 
-// Maps straight onto EventCreateDto in api/src/app/admin/dto/event-create.dto.ts.
-// Always submitted with isActive: false unless told otherwise -- that draft state
-// is what makes the later "approval" step free instead of a feature we have to build.
-export async function createDraftEvent(input: CreateEventInput) {
-  const res = await fetch(`${API_BASE}/admin/events`, {
-    method: 'POST',
-    headers: await authHeaders(),
-    body: JSON.stringify({ ...input, isActive: input.isActive ?? false }),
-  });
+async function throwIfNotOk(res: Response): Promise<void> {
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`${res.status} ${res.statusText}${body ? ` — ${body}` : ''}`);
   }
+}
+
+export interface CreateDraftInput {
+  title: string;
+  shortDescription?: string;
+  longDescription?: string;
+  isActive?: boolean;
+  // Set after a successful uploadStagingPhoto() call for the same stagingId --
+  // each admin controller pulls the staged photo in at create time.
+  stagingId?: string;
+  // Only meaningful for events and CTAs (EventCreateDto requires these; CTAs
+  // accept them optionally). Ignored by the class/impact-story endpoints if sent.
+  startDate?: string;
+  endDate?: string;
+  // Required for CTAs only -- see CTA_TYPE_OPTIONS in contentTypes.ts.
+  type?: string;
+}
+
+// One create call for all four content kinds -- they share the same core
+// fields (title/descriptions/isActive/stagingId), maps onto whichever
+// *CreateDto the backend expects for that kind. Always submitted with
+// isActive: false unless told otherwise -- that draft state is what makes the
+// later "approval" step (see fetchDrafts/approveDraft below) free instead of a
+// feature we have to build.
+export async function createDraft(kind: ContentKind, input: CreateDraftInput) {
+  const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}`, {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: JSON.stringify({ ...input, isActive: input.isActive ?? false }),
+  });
+  await throwIfNotOk(res);
   return res.json();
+}
+
+// Uploads a photo ahead of create. Must be followed by createDraft() for the
+// same kind with the same stagingId, which is what actually attaches the
+// photo to the created record -- this call alone just parks the file
+// server-side.
+export async function uploadStagingPhoto(
+  kind: ContentKind,
+  stagingId: string,
+  file: Blob,
+  filename: string,
+): Promise<{ url: string }> {
+  const form = new FormData();
+  form.append('file', file, filename);
+  const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}/staging/${stagingId}/photo`, {
+    method: 'POST',
+    // No content-type here -- fetch sets multipart/form-data with the right
+    // boundary automatically for a FormData body. Setting it manually breaks upload.
+    headers: await authHeadersRaw(),
+    body: form,
+  });
+  await throwIfNotOk(res);
+  return res.json();
+}
+
+// One row of the approval queue -- a not-yet-active record of any kind. Only
+// the fields the queue actually displays get pulled out of each API's (very
+// differently shaped) response.
+export interface DraftItem {
+  kind: ContentKind;
+  id: string;
+  title: string;
+  shortDescription?: string;
+  photoUrl?: string;
+  createdAt: string;
+}
+
+// Pulls all four lists in parallel and keeps only isActive: false rows --
+// that's the entire definition of "needs approval" here, since every create
+// from this clipper lands as a draft. Merged and sorted newest-first so the
+// queue reads as one inbox instead of four separate tabs.
+export async function fetchDrafts(): Promise<DraftItem[]> {
+  const headers = await authHeaders();
+  const perKind = await Promise.all(
+    CONTENT_KINDS.map(async (kind) => {
+      const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}`, { headers });
+      await throwIfNotOk(res);
+      const data = await res.json();
+      const rows: Array<Record<string, unknown>> = data[CONTENT_LIST_KEY[kind]] ?? [];
+      return rows
+        .filter((r) => !r.isActive)
+        .map(
+          (r): DraftItem => ({
+            kind,
+            id: String(r.id),
+            title: String(r.title ?? '(untitled)'),
+            shortDescription: (r.shortDescription as string | undefined) ?? undefined,
+            photoUrl: (r.photoUrl as string | undefined) ?? undefined,
+            createdAt: String(r.createdAt ?? ''),
+          }),
+        );
+    }),
+  );
+  return perKind.flat().sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+// Flips isActive: true -- the entire "approval" action. Every admin PATCH
+// endpoint accepts isActive and fires the app notification on the
+// false-to-true transition, so this is genuinely all approval takes.
+export async function approveDraft(kind: ContentKind, id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}/${id}`, {
+    method: 'PATCH',
+    headers: await authHeaders(),
+    body: JSON.stringify({ isActive: true }),
+  });
+  await throwIfNotOk(res);
+}
+
+// Permanently deletes a draft -- for rejecting something the clipper grabbed
+// that isn't worth keeping around.
+export async function discardDraft(kind: ContentKind, id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}/${id}`, {
+    method: 'DELETE',
+    headers: await authHeadersRaw(),
+  });
+  await throwIfNotOk(res);
 }
 
 export interface SeedUser {
