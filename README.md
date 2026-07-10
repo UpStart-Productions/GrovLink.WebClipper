@@ -28,6 +28,16 @@ database path actually works, before building out the rest.
   (`isActive: false`) across all four types for the signed-in tenant, with one-tap
   Approve (flips `isActive: true`, which also triggers the app notification) or Discard
   (deletes it). This is what makes "Save as draft" a complete loop instead of a dead end.
+- **Notification bell.** Shows the same staff-facing operational alerts the admin
+  dashboard does (class registrations, volunteer interest, voucher requests, intake
+  submissions, etc. — see `AdminNotificationsController`), with an unread-count badge.
+  Read-only against the backend by design: the extension never calls the mark-read/unread
+  or approve/deny endpoints — those are real, shared processing actions that belong in the
+  admin dashboard, where everyone on staff sees the same state. Each notification has an
+  "open in app" icon (deep-linked the same way the admin dashboard's own bell links, via
+  `notificationLinkPath()` in `lib/api.ts`) that opens the right admin page in a new tab and
+  remembers, in this browser only (`lib/notificationViews.ts`), that this person looked at
+  it — fading and sinking it locally without touching the shared `readAt`.
 - **Date detection, two tiers.** Start/End auto-fill instead of sitting at the generic
   +24h default, using whichever of these actually has data:
   1. **Structured page data.** Most event platforms (Eventbrite, Facebook Events, Meetup,
@@ -45,17 +55,32 @@ database path actually works, before building out the rest.
 
   Either way, a helper note under the fields says what was detected and where it came
   from; editing either field clears the note.
-- **Dev login.** A stand-in for real auth (see "What's deliberately left out" below).
+- **Real Cognito login.** "Sign in with GrovLink" opens the same Hosted UI the admin
+  dashboard uses (password or "Continue with Google") via
+  `chrome.identity.launchWebAuthFlow`, using OAuth Authorization Code + PKCE against
+  Cognito's token endpoint directly — no AWS Amplify, no backend auth endpoint. Reuses
+  the admin app's existing App Client (`4qvqllf1hegq189djtbj04vn2b`), so it's the same
+  user pool and the same signed-in users. After login, a picker walks `GET
+  /my-customers` → `GET /my-tenants` to choose which org to act as (auto-skipping any
+  step with only one option). See `lib/cognitoAuth.ts` and `lib/orgContext.ts`.
+- **Dev login.** Still available behind "Use local dev login instead" on the sign-in
+  screen, for local testing without a real account (see below).
 - **Real write paths.** Saving submits a genuine create call to your local API, landing as
   a draft (`isActive: false`) in whatever tenant you signed in as.
 
 ## What's deliberately left out (for now)
 
-- **Real login.** This stub signs in with your API's *dev* auth headers
-  (`x-user-email` / `x-customer-slug` / `x-tenant-slug`), not Cognito. Those headers only
-  work when the API's `NODE_ENV !== 'production'` — see
-  `api/src/app/auth/dev-auth.guard.ts` in `Nonprofit.Mobile.Platform`. Real Cognito login
-  (direct, no backend auth endpoint needed, ~365-day session) is the next piece to build.
+- **Dev login only works locally.** The "Use local dev login instead" path sends your
+  API's *dev* auth headers (`x-user-email` / `x-customer-slug` / `x-tenant-slug`) instead
+  of a token, and only works when the API's `NODE_ENV !== 'production'` — see
+  `api/src/app/auth/dev-auth.guard.ts` in `Nonprofit.Mobile.Platform`. Cognito login works
+  against the local API too (`AppAuthGuard` checks for a Bearer token regardless of
+  `NODE_ENV`), so there's no need to use dev login unless you want to skip real auth
+  entirely.
+- **One AWS-side registration still needed.** The extension's OAuth redirect URI
+  (`https://cdoajlipibgcaelkcfljfakanlclogpj.chromiumapp.org/`) needs to be added to the
+  Cognito App Client's allowed callback URLs *and* allowed sign-out URLs before
+  "Sign in with GrovLink" will work — see `dev-keys/README.md`.
 - **Toolbar quick-capture popup, settings page.** Screens 3 and 12 from the UI concepts
   doc. The side panel here does the job of both in one place for now.
 - **Attachments (PDFs etc.).** Only the single photo per item is wired up, not the separate
@@ -128,11 +153,20 @@ entrypoints/
     App.tsx             dev login + capture form + approval queue (the bulk of the logic)
     style.css
 lib/
-  api.ts                fetch wrapper for the local API (create/staging/list/approve/discard)
+  api.ts                fetch wrapper for the local API (create/staging/list/approve/discard,
+                        plus my-customers/my-tenants for the org picker)
   contentTypes.ts        shared shape of the four content kinds (event/cta/class/impact_story)
   dateParse.ts           chrono-node wrapper: text -> Start/End, filters out vague matches
                          (structured schema.org/Event JSON-LD is read in content.ts instead --
                          see extractEventSchema() there)
+  cognitoAuth.ts          real Cognito Hosted UI login (launchWebAuthFlow + PKCE), token
+                         storage/refresh
+  orgContext.ts           which customer/tenant a Cognito-signed-in user picked
+  notificationViews.ts    local-only (per-browser) "I've looked at this notification"
+                         tracking -- never synced to the backend's readAt
   devAuth.ts             chrome.storage-backed dev credentials
   capture.ts             shape of a pending capture + how it's read/cleared
+dev-keys/
+  extension-dev-key.pem  pinned keypair for a stable extension ID (gitignored) -- see
+                        dev-keys/README.md for why, and the AWS callback URL to register
 ```

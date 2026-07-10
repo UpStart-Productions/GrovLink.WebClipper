@@ -1,8 +1,24 @@
-import { API_BASE } from './config';
+import { ADMIN_BASE_URL, API_BASE } from './config';
 import { getDevCreds } from './devAuth';
+import { getValidIdToken } from './cognitoAuth';
+import { getOrgContext } from './orgContext';
 import { CONTENT_BASE_PATH, CONTENT_KINDS, CONTENT_LIST_KEY, ContentKind } from './contentTypes';
 
+// Real Cognito login takes priority when both are present -- that shouldn't
+// normally happen (App.tsx only ever sets up one at a time and "switch"
+// clears whichever is active), but if it did, a real signed-in session is
+// the one actually backed by a live token worth trusting.
 async function authHeadersRaw(): Promise<Record<string, string>> {
+  const idToken = await getValidIdToken();
+  if (idToken) {
+    const org = await getOrgContext();
+    if (!org) throw new Error('Pick an organization before making changes.');
+    return {
+      Authorization: `Bearer ${idToken}`,
+      'x-customer-slug': org.customerSlug,
+      'x-tenant-slug': org.tenantSlug,
+    };
+  }
   const creds = await getDevCreds();
   if (!creds) throw new Error('Not signed in yet.');
   return {
@@ -139,6 +155,135 @@ export async function discardDraft(kind: ContentKind, id: string): Promise<void>
     headers: await authHeadersRaw(),
   });
   await throwIfNotOk(res);
+}
+
+// Staff-facing operational alerts -- class registrations, volunteer
+// interest, voucher requests, intake submissions, etc. (see
+// AdminNotificationsController in Nonprofit.Mobile.Platform). View-only here
+// by design: some notification types have dedicated approve/deny endpoints
+// that trigger real side effects (approving a voucher, etc.) -- those stay
+// in the admin dashboard rather than being duplicated into the extension.
+export interface AdminNotification {
+  id: string;
+  tenantId: string;
+  tenant: { id: string; slug: string; name: string } | null;
+  type: string;
+  title: string;
+  body: string | null;
+  meta: unknown;
+  readAt: string | null;
+  createdAt: string;
+}
+
+// Where "open in app" for a given notification should go -- ported directly
+// from NotificationsBellComponent#getNotificationLink in the admin app
+// (admin/src/app/ui/notifications-bell/notifications-bell.component.ts) so
+// the extension deep-links to the same place the admin dashboard's own bell
+// would. Returns an admin-app-relative path (e.g. ['/events', id]), or null
+// when there's nothing more specific to link to -- callers fall back to the
+// dashboard home in that case.
+export function notificationLinkPath(n: AdminNotification): string[] | null {
+  const meta = (n.meta ?? null) as {
+    itemType?: string;
+    itemId?: string;
+    serviceId?: string;
+    appUserId?: string;
+  } | null;
+  if ((n.type === 'voucher_request' || n.type === 'volunteer_interest') && meta?.appUserId) {
+    return ['/app-users', meta.appUserId];
+  }
+  if (!meta?.itemType || !meta?.itemId) return null;
+  switch (meta.itemType) {
+    case 'event':
+      return ['/events', meta.itemId];
+    case 'class':
+      return ['/classes', meta.itemId];
+    case 'service':
+      return ['/services', meta.itemId];
+    case 'cta':
+      return ['/ctas', meta.itemId];
+    case 'provider_offering':
+      return meta.serviceId ? ['/services', meta.serviceId, 'offerings', meta.itemId] : null;
+    case 'volunteer_position':
+      return ['/volunteers'];
+    case 'donation':
+      return ['/donations'];
+    default:
+      return null;
+  }
+}
+
+// Full URL for the "open in app" icon -- falls back to the dashboard home
+// when notificationLinkPath() has nothing more specific (some notification
+// types, like class_registration, have no admin-app deep link at all).
+export function notificationAppUrl(n: AdminNotification): string {
+  const path = notificationLinkPath(n);
+  return `${ADMIN_BASE_URL}${path ? path.join('/') : '/'}`;
+}
+
+export async function fetchNotifications(opts?: { unreadOnly?: boolean; limit?: number }): Promise<AdminNotification[]> {
+  const params = new URLSearchParams();
+  if (opts?.unreadOnly) params.set('unreadOnly', 'true');
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  const res = await fetch(`${API_BASE}/admin/notifications${qs ? `?${qs}` : ''}`, {
+    headers: await authHeadersRaw(),
+  });
+  await throwIfNotOk(res);
+  const data = await res.json();
+  return data.notifications ?? [];
+}
+
+export async function fetchUnreadNotificationCount(): Promise<number> {
+  const res = await fetch(`${API_BASE}/admin/notifications/unread-count`, {
+    headers: await authHeadersRaw(),
+  });
+  await throwIfNotOk(res);
+  const data = await res.json();
+  return data.count ?? 0;
+}
+
+// Deliberately no markNotificationRead/markNotificationUnread here. The
+// extension only ever reads notifications (this fetch + the unread-count
+// one above) -- marking something read/unread, approved, denied, etc. is
+// real processing that happens in the admin dashboard. See
+// lib/notificationViews.ts for the extension's own local-only "I've looked
+// at this" tracking, which never touches the backend's readAt.
+
+export interface OrgOption {
+  id: string;
+  slug: string;
+  name: string;
+}
+
+// GET /my-customers -- deliberately no x-customer-slug header here, since
+// finding out which customers this user belongs to is the whole point
+// (see UsersController#myCustomers in Nonprofit.Mobile.Platform, which reads
+// req.user straight off the verified JWT). Only meaningful for real Cognito
+// sign-in; dev mode skips this since DevLogin already asks for the slugs
+// directly.
+export async function fetchMyCustomers(): Promise<OrgOption[]> {
+  const idToken = await getValidIdToken();
+  if (!idToken) throw new Error('Not signed in.');
+  const res = await fetch(`${API_BASE}/my-customers`, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  await throwIfNotOk(res);
+  const data = await res.json();
+  return data.customers ?? [];
+}
+
+// GET /my-tenants -- this one *does* need x-customer-slug, since it's asking
+// "which locations within this customer," not a global list.
+export async function fetchMyTenants(customerSlug: string): Promise<OrgOption[]> {
+  const idToken = await getValidIdToken();
+  if (!idToken) throw new Error('Not signed in.');
+  const res = await fetch(`${API_BASE}/my-tenants`, {
+    headers: { Authorization: `Bearer ${idToken}`, 'x-customer-slug': customerSlug },
+  });
+  await throwIfNotOk(res);
+  const data = await res.json();
+  return data.tenants ?? [];
 }
 
 export interface SeedUser {
