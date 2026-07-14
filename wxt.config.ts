@@ -1,33 +1,55 @@
 import { defineConfig } from 'wxt';
 
+// Deliberately not using WXT's env.mode here (development/production) --
+// `wxt build` defaults to "production" mode even for an everyday local
+// "Load unpacked" test build, so that flag can't distinguish "about to
+// upload this to the Chrome Web Store" from "just testing locally." Instead
+// this reads the same WXT_API_ENV env var lib/config.ts uses, set only by
+// `npm run build:release`/`npm run zip:release`. Plain `npm run build`
+// keeps producing the dev-labeled, localhost-pointed build exactly as
+// before.
+const isReleaseBuild = process.env.WXT_API_ENV === 'production';
+
 // See https://wxt.dev/api/config.html
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   srcDir: '.',
   manifest: {
-    name: 'GrovLink Web Clipper (dev)',
+    name: isReleaseBuild ? 'GrovLink Web Clipper' : 'GrovLink Web Clipper (dev)',
     description:
-      'Capture events from any page and send them to GrovLink as drafts. Local dev build, not for the Chrome Web Store.',
-    version: '0.0.1',
-    // Pins the extension to a fixed ID (cdoajlipibgcaelkcfljfakanlclogpj) across
-    // rebuilds/reloads instead of getting a new random one every "Load unpacked".
-    // Required for Cognito login: the OAuth redirect URI
-    // (https://cdoajlipibgcaelkcfljfakanlclogpj.chromiumapp.org/) has to be a
-    // fixed, known value we can register in the Cognito App Client ahead of time.
-    // Private key lives at dev-keys/extension-dev-key.pem (gitignored, not a
-    // secret in the traditional sense -- just needs to stay stable on this
-    // machine so the ID doesn't change). See dev-keys/README.md.
-    key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqaFbAWJ/hG1MnRVOpLnpQJ0VOHDk4cYb1brMS2JY2xDloI2LXpI9oiqXqo2b1YubMdaBaWtD+J/1I3D3ZCqzlMBpDOW+FFAkxMOw8W/us64AVKYlfinD7MxKEQuUZTdkyOkv8CRKQqw0g18eJNQmftFwab1eqXT/FsaPwPmJRePD0xKgRzVwCQvGLmDX3QNED9tW+iZCm99tmdgkFp1elDGRXNjM6wUFiJsxYT3LwhXS2788Lp4VD59P8Pyt6vkWq8MfzSMrUo1C34tBA1r6UJLoCRhcjMxcVZlVA5ogMrBG2tT+0AzHEx1/OiDN0dJOE7qbHpgEuWpGSY3skLaGXQIDAQAB',
+      'Capture events, calls to action, classes, and impact stories from any webpage and send them to GrovLink as drafts for approval.',
+    version: '1.0.0',
+    // Pins the extension to a fixed ID (cdoajlipibgcaelkcfljfakanlclogpj) for
+    // local dev/testing builds only -- Chrome Web Store rejects a manifest
+    // with a `key` field on first upload (it assigns its own ID instead), so
+    // this is omitted entirely from release builds below. That means the
+    // published extension gets a *different* ID than the one used for local
+    // testing -- after the first upload, grab the real assigned ID from the
+    // Developer Dashboard and register its
+    // https://<that-id>.chromiumapp.org/ as an additional callback + sign-out
+    // URL on the Cognito App Client (keep the dev one registered too, so
+    // local testing keeps working). Private key lives at
+    // dev-keys/extension-dev-key.pem (gitignored, not a secret in the
+    // traditional sense -- just needs to stay stable so the local dev ID
+    // doesn't change). See dev-keys/README.md.
+    ...(isReleaseBuild
+      ? {}
+      : {
+          key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqaFbAWJ/hG1MnRVOpLnpQJ0VOHDk4cYb1brMS2JY2xDloI2LXpI9oiqXqo2b1YubMdaBaWtD+J/1I3D3ZCqzlMBpDOW+FFAkxMOw8W/us64AVKYlfinD7MxKEQuUZTdkyOkv8CRKQqw0g18eJNQmftFwab1eqXT/FsaPwPmJRePD0xKgRzVwCQvGLmDX3QNED9tW+iZCm99tmdgkFp1elDGRXNjM6wUFiJsxYT3LwhXS2788Lp4VD59P8Pyt6vkWq8MfzSMrUo1C34tBA1r6UJLoCRhcjMxcVZlVA5ogMrBG2tT+0AzHEx1/OiDN0dJOE7qbHpgEuWpGSY3skLaGXQIDAQAB',
+        }),
     // 'identity' is what unlocks chrome.identity.launchWebAuthFlow() for the
     // Cognito Hosted UI login (see lib/cognitoAuth.ts).
     permissions: ['storage', 'activeTab', 'contextMenus', 'sidePanel', 'identity'],
-    // Local backend for this stub, plus Cognito's Hosted UI domain (token
-    // exchange/refresh calls in lib/cognitoAuth.ts run as ordinary fetch()
-    // from the side panel, and this grants them cross-origin access
+    // Cognito's Hosted UI domain is needed either way (token exchange/refresh
+    // calls in lib/cognitoAuth.ts run as ordinary fetch() from the side
+    // panel, and host_permissions is what grants them cross-origin access
     // regardless of whether Cognito's token endpoint sends CORS headers).
-    // Add the production API origin here once the extension talks to
-    // anything besides localhost.
-    host_permissions: ['http://localhost:3000/*', 'https://auth.grovlink.com/*'],
+    // The API origin itself differs: production builds talk to the real
+    // GrovLink API, dev builds talk to localhost (see lib/config.ts, which
+    // has to stay in sync with this list).
+    host_permissions: isReleaseBuild
+      ? ['https://api.grovlink.com/*', 'https://auth.grovlink.com/*']
+      : ['http://localhost:3000/*', 'https://auth.grovlink.com/*'],
     icons: {
       16: 'icon/16.png',
       32: 'icon/32.png',

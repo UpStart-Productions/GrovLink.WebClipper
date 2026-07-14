@@ -198,14 +198,23 @@ function LoginScreen({
             {cognitoBusy ? 'Signing in…' : 'Sign in with GrovLink'}
           </button>
           {cognitoError && <div className="login-error">{cognitoError}</div>}
-          <button
-            className="link-button"
-            style={{ marginTop: 14, display: 'block' }}
-            onClick={() => setShowDevLogin((v) => !v)}
-          >
-            {showDevLogin ? 'Hide local dev login' : 'Use local dev login instead'}
-          </button>
-          {showDevLogin && <DevLogin onSignedIn={onDevSignedIn} />}
+          {/* Dev-mode header-auth login only makes sense against a local API
+              (see dev-auth.guard.ts, gated off entirely when NODE_ENV is
+              production) -- hidden in the release build (see lib/config.ts's
+              WXT_API_ENV) so real users never see a toggle that can't do
+              anything for them. */}
+          {import.meta.env.WXT_API_ENV !== 'production' && (
+            <>
+              <button
+                className="link-button"
+                style={{ marginTop: 14, display: 'block' }}
+                onClick={() => setShowDevLogin((v) => !v)}
+              >
+                {showDevLogin ? 'Hide local dev login' : 'Use local dev login instead'}
+              </button>
+              {showDevLogin && <DevLogin onSignedIn={onDevSignedIn} />}
+            </>
+          )}
         </div>
       </div>
     </div>
