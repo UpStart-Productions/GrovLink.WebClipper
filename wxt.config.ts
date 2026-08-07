@@ -18,7 +18,7 @@ export default defineConfig({
     name: isReleaseBuild ? 'GrovLink Web Clipper' : 'GrovLink Web Clipper (dev)',
     description:
       'Capture events, calls to action, classes, and impact stories from any webpage and send them to GrovLink as drafts for approval.',
-    version: '1.0.0',
+    version: '1.0.1',
     // Pins the extension to a fixed ID (cdoajlipibgcaelkcfljfakanlclogpj) for
     // local dev/testing builds only -- Chrome Web Store rejects a manifest
     // with a `key` field on first upload (it assigns its own ID instead), so
