@@ -204,6 +204,22 @@ body {
   width: 100%;
 }
 
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.divider::before,
+.divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 .field-group {
   margin-bottom: 12px;
 }

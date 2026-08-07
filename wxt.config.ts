@@ -48,8 +48,16 @@ export default defineConfig({
     // GrovLink API, dev builds talk to localhost (see lib/config.ts, which
     // has to stay in sync with this list).
     host_permissions: isReleaseBuild
-      ? ['https://api.grovlink.com/*', 'https://auth.grovlink.com/*']
-      : ['http://localhost:3000/*', 'https://auth.grovlink.com/*'],
+      ? [
+          'https://api.grovlink.com/*',
+          'https://auth.grovlink.com/*',
+          'https://cognito-idp.us-west-2.amazonaws.com/*',
+        ]
+      : [
+          'http://localhost:3000/*',
+          'https://auth.grovlink.com/*',
+          'https://cognito-idp.us-west-2.amazonaws.com/*',
+        ],
     icons: {
       16: 'icon/16.png',
       32: 'icon/32.png',

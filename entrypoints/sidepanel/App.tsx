@@ -1,8 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ExternalLink, LogOut, RefreshCw } from 'lucide-react';
+import { AuthRequiredError, setAuthExpiredHandler } from '../../lib/authSession';
 import { DevCreds, clearDevCreds, getDevCreds, setDevCreds } from '../../lib/devAuth';
-import { getCognitoTokens, signInWithCognito, signOutCognito } from '../../lib/cognitoAuth';
+import {
+  confirmSignInWithNewPassword,
+  getAuthErrorMessage,
+  hasCognitoSession,
+  signInWithGoogle,
+  signInWithPassword,
+  signOutCognito,
+} from '../../lib/cognitoAuth';
 import { OrgContext, clearOrgContext, getOrgContext, setOrgContext } from '../../lib/orgContext';
+import {
+  SavedFormDraft,
+  clearFormDraft,
+  fileToDraftPhoto,
+  loadFormDraft,
+  photoFileFromDraft,
+  saveFormDraft,
+} from '../../lib/formDraft';
 import { getViewedNotificationIds, markNotificationViewedLocally } from '../../lib/notificationViews';
 import { CapturePayload, getActiveTabCapture, takePendingCapture } from '../../lib/capture';
 import {
@@ -64,23 +80,49 @@ function formatOrgLabel(org: ActiveOrg): string {
 export default function App() {
   const [screen, setScreen] = useState<Screen>('loading');
   const [org, setOrg] = useState<ActiveOrg | null>(null);
+  const [loginError, setLoginError] = useState('');
   // Tracks which sign-in path is live so "switch" knows exactly what to tear
   // down -- clearing dev creds when a Cognito session is active (or vice
   // versa) would leave stale state around for no reason.
   const [authMode, setAuthMode] = useState<'dev' | 'cognito' | null>(null);
 
+  const handleSessionExpired = useCallback(async () => {
+    if (authMode === 'cognito') {
+      await signOutCognito();
+      await clearOrgContext();
+    } else if (authMode === 'dev') {
+      await clearDevCreds();
+    }
+    setOrg(null);
+    setAuthMode(null);
+    setLoginError('Your session expired. Please sign in again.');
+    setScreen('login');
+  }, [authMode]);
+
+  useEffect(() => {
+    setAuthExpiredHandler(() => {
+      void handleSessionExpired();
+    });
+    return () => setAuthExpiredHandler(null);
+  }, [handleSessionExpired]);
+
   useEffect(() => {
     (async () => {
-      const cognitoTokens = await getCognitoTokens();
-      if (cognitoTokens) {
+      if (await hasCognitoSession()) {
         setAuthMode('cognito');
         const savedOrg = await getOrgContext();
         if (savedOrg) {
-          setOrg(savedOrg);
-          setScreen('capture');
+          try {
+            await fetchMyCustomers();
+            setOrg(savedOrg);
+            setScreen('capture');
+          } catch {
+            await signOutCognito();
+            await clearOrgContext();
+            setLoginError('Your session expired. Please sign in again.');
+            setScreen('login');
+          }
         } else {
-          // Signed in, but never finished (or lost) org selection -- send
-          // back through the picker rather than guessing.
           setScreen('org-picker');
         }
         return;
@@ -97,6 +139,7 @@ export default function App() {
   }, []);
 
   async function handleSwitchOrg() {
+    await clearFormDraft();
     if (authMode === 'cognito') {
       await signOutCognito();
       await clearOrgContext();
@@ -105,6 +148,7 @@ export default function App() {
     }
     setOrg(null);
     setAuthMode(null);
+    setLoginError('');
     setScreen('login');
   }
 
@@ -115,13 +159,16 @@ export default function App() {
   if (screen === 'login') {
     return (
       <LoginScreen
+        initialError={loginError}
         onDevSignedIn={(c) => {
           setAuthMode('dev');
           setOrg(c);
+          setLoginError('');
           setScreen('capture');
         }}
         onCognitoSignedIn={() => {
           setAuthMode('cognito');
+          setLoginError('');
           setScreen('org-picker');
         }}
       />
@@ -153,6 +200,7 @@ export default function App() {
       authMode={authMode}
       onOrgChange={setOrg}
       onSwitchOrg={handleSwitchOrg}
+      onSessionExpired={handleSessionExpired}
     />
   );
 }
@@ -161,25 +209,87 @@ export default function App() {
 // account as the admin dashboard) front and center, with the old dev-mode
 // header-based login tucked behind a toggle for local testing. See README
 // for why both exist.
+type CognitoFormMode = 'login' | 'new-password-required';
+
 function LoginScreen({
+  initialError,
   onDevSignedIn,
   onCognitoSignedIn,
 }: {
+  initialError?: string;
   onDevSignedIn: (creds: DevCreds) => void;
   onCognitoSignedIn: () => void;
 }) {
   const [showDevLogin, setShowDevLogin] = useState(false);
+  const [cognitoMode, setCognitoMode] = useState<CognitoFormMode>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState('');
   const [cognitoBusy, setCognitoBusy] = useState(false);
-  const [cognitoError, setCognitoError] = useState<string | null>(null);
+  const [cognitoError, setCognitoError] = useState(initialError ?? '');
 
-  async function handleCognitoSignIn() {
+  async function handleEmailPasswordSignIn() {
+    setCognitoError('');
+    if (!email.trim()) {
+      setCognitoError('Email is required.');
+      return;
+    }
+    if (!password) {
+      setCognitoError('Password is required.');
+      return;
+    }
+
     setCognitoBusy(true);
-    setCognitoError(null);
     try {
-      await signInWithCognito();
+      const { needsNewPassword } = await signInWithPassword(email, password);
+      if (needsNewPassword) {
+        setCognitoMode('new-password-required');
+        setNewPassword('');
+        setNewPasswordConfirm('');
+        setPassword('');
+      } else {
+        onCognitoSignedIn();
+      }
+    } catch (err) {
+      setCognitoError(getAuthErrorMessage(err));
+    } finally {
+      setCognitoBusy(false);
+    }
+  }
+
+  async function handleNewPassword() {
+    setCognitoError('');
+    const p = newPassword.trim();
+    const c = newPasswordConfirm.trim();
+    if (p.length < 8) {
+      setCognitoError('Password must be at least 8 characters.');
+      return;
+    }
+    if (p !== c) {
+      setCognitoError('Passwords do not match.');
+      return;
+    }
+
+    setCognitoBusy(true);
+    try {
+      await confirmSignInWithNewPassword(p);
       onCognitoSignedIn();
     } catch (err) {
-      setCognitoError(err instanceof Error ? err.message : String(err));
+      setCognitoError(getAuthErrorMessage(err));
+    } finally {
+      setCognitoBusy(false);
+    }
+  }
+
+  async function handleGoogleSignIn() {
+    setCognitoBusy(true);
+    setCognitoError('');
+    try {
+      await signInWithGoogle();
+      onCognitoSignedIn();
+    } catch (err) {
+      setCognitoError(getAuthErrorMessage(err));
     } finally {
       setCognitoBusy(false);
     }
@@ -191,19 +301,97 @@ function LoginScreen({
         <img className="login-mark" src={chrome.runtime.getURL('grovlink-logo.svg')} alt="GrovLink" />
         <p className="login-title">Sign in to GrovLink</p>
         <p className="login-sub">
-          Use the same account you sign in to the GrovLink admin dashboard with.
+          Use the same email and password as the GrovLink admin dashboard.
         </p>
         <div className="login-form">
-          <button className="btn-primary" onClick={handleCognitoSignIn} disabled={cognitoBusy}>
-            {cognitoBusy ? 'Signing in…' : 'Sign in with GrovLink'}
-          </button>
+          {cognitoMode === 'login' ? (
+            <>
+              <div className="field-group">
+                <label className="field-label">Email</label>
+                <input
+                  className="field-input"
+                  type="email"
+                  autoComplete="username"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                />
+              </div>
+              <div className="field-group">
+                <label className="field-label">Password</label>
+                <input
+                  className="field-input"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                />
+              </div>
+              <button
+                className="btn-primary"
+                onClick={handleEmailPasswordSignIn}
+                disabled={cognitoBusy || !email.trim() || !password}
+              >
+                {cognitoBusy ? 'Signing in…' : 'Sign in'}
+              </button>
+              <div className="divider" style={{ margin: '16px 0' }}>
+                <span>or</span>
+              </div>
+              <button className="btn-secondary" onClick={handleGoogleSignIn} disabled={cognitoBusy}>
+                Sign in with Google
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="login-sub" style={{ textAlign: 'left', marginBottom: 12 }}>
+                Your account uses a temporary password. Set a new password to continue.
+              </p>
+              <div className="field-group">
+                <label className="field-label">New password</label>
+                <input
+                  className="field-input"
+                  type="password"
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                />
+              </div>
+              <div className="field-group">
+                <label className="field-label">Confirm new password</label>
+                <input
+                  className="field-input"
+                  type="password"
+                  autoComplete="new-password"
+                  value={newPasswordConfirm}
+                  onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                  placeholder="••••••••"
+                />
+              </div>
+              <button
+                className="btn-primary"
+                onClick={handleNewPassword}
+                disabled={cognitoBusy || !newPassword || !newPasswordConfirm}
+              >
+                {cognitoBusy ? 'Saving…' : 'Set password and sign in'}
+              </button>
+              <button
+                className="link-button"
+                style={{ marginTop: 12, display: 'block' }}
+                onClick={() => {
+                  setCognitoMode('login');
+                  setCognitoError('');
+                  setNewPassword('');
+                  setNewPasswordConfirm('');
+                }}
+              >
+                Back to sign in
+              </button>
+            </>
+          )}
           {cognitoError && <div className="login-error">{cognitoError}</div>}
-          {/* Dev-mode header-auth login only makes sense against a local API
-              (see dev-auth.guard.ts, gated off entirely when NODE_ENV is
-              production) -- hidden in the release build (see lib/config.ts's
-              WXT_API_ENV) so real users never see a toggle that can't do
-              anything for them. */}
-          {import.meta.env.WXT_API_ENV !== 'production' && (
+          {import.meta.env.WXT_API_ENV !== 'production' && cognitoMode === 'login' && (
             <>
               <button
                 className="link-button"
@@ -492,11 +680,13 @@ function MainPanel({
   authMode,
   onOrgChange,
   onSwitchOrg,
+  onSessionExpired,
 }: {
   org: ActiveOrg;
   authMode: 'dev' | 'cognito' | null;
   onOrgChange: (org: ActiveOrg) => void;
   onSwitchOrg: () => void;
+  onSessionExpired: () => void;
 }) {
   const [tab, setTab] = useState<'capture' | 'queue'>('capture');
   const [showNotifications, setShowNotifications] = useState(false);
@@ -543,38 +733,44 @@ function MainPanel({
           onUnreadCountChange={setUnreadCount}
         />
       ) : (
-        <>
-          <div className="tab-row">
-            <button
-              className={`tab-btn${tab === 'capture' ? ' active' : ''}`}
-              onClick={() => setTab('capture')}
-            >
-              Capture
-            </button>
-            <button
-              className={`tab-btn${tab === 'queue' ? ' active' : ''}`}
-              onClick={() => setTab('queue')}
-            >
-              Approve
-            </button>
-          </div>
-          {/* Keyed by which org is active so switching (via the pill below)
-              remounts whichever tab is showing -- a fresh capture-form load or
-              drafts fetch for the newly selected org, instead of carrying over
-              state that belonged to the previous one. */}
-          {tab === 'capture' ? (
-            <CapturePanelBody key={`${org.customerSlug}:${org.tenantSlug}`} />
-          ) : (
-            <QueuePanel key={`${org.customerSlug}:${org.tenantSlug}`} />
-          )}
-        </>
+        <div className="tab-row">
+          <button
+            className={`tab-btn${tab === 'capture' ? ' active' : ''}`}
+            onClick={() => setTab('capture')}
+          >
+            Capture
+          </button>
+          <button
+            className={`tab-btn${tab === 'queue' ? ' active' : ''}`}
+            onClick={() => setTab('queue')}
+          >
+            Approve
+          </button>
+        </div>
       )}
+      {/* Capture stays mounted while notifications are open so form work isn't lost. */}
+      <div style={{ display: !showNotifications && tab === 'capture' ? undefined : 'none' }}>
+        <CapturePanelBody
+          key={`${org.customerSlug}:${org.tenantSlug}`}
+          org={org}
+          onSessionExpired={onSessionExpired}
+        />
+      </div>
+      <div style={{ display: !showNotifications && tab === 'queue' ? undefined : 'none' }}>
+        <QueuePanel key={`${org.customerSlug}:${org.tenantSlug}`} />
+      </div>
     </div>
   );
 }
 
-function CapturePanelBody() {
-  const [contentType, setContentType] = useState<ContentKind>('event');
+function CapturePanelBody({
+  org,
+  onSessionExpired,
+}: {
+  org: ActiveOrg;
+  onSessionExpired: () => void;
+}) {
+  const [contentType, setContentType] = useState<ContentKind>('impact_story');
   const [ctaType, setCtaType] = useState(CTA_TYPE_OPTIONS[0].value);
 
   const [capture, setCapture] = useState<CapturePayload | null>(null);
@@ -594,11 +790,14 @@ function CapturePanelBody() {
   const [dateNote, setDateNote] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState('');
+  const [successNote, setSuccessNote] = useState('');
   const [createdId, setCreatedId] = useState<string | null>(null);
 
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [photoNote, setPhotoNote] = useState('');
+  const persistTimerRef = useRef<number | null>(null);
+  const skipNextPersistRef = useRef(false);
 
   // Only Event and CTA have a meaningful date range in their create DTOs
   // (Class dates come from a schedule rule/sessions, Impact Story has none).
@@ -610,6 +809,60 @@ function CapturePanelBody() {
       return file ? URL.createObjectURL(file) : null;
     });
     setPhotoFile(file);
+  }
+
+  async function persistDraft() {
+    if (skipNextPersistRef.current) return;
+    const draft: SavedFormDraft = {
+      orgKey: `${org.customerSlug}:${org.tenantSlug}`,
+      contentType,
+      ctaType,
+      title,
+      shortDescription,
+      longDescription,
+      quotedText,
+      startDate,
+      endDate,
+      dateNote,
+      photoNote,
+      capture,
+      savedAt: Date.now(),
+    };
+    if (photoFile) {
+      try {
+        Object.assign(draft, await fileToDraftPhoto(photoFile));
+      } catch {
+        /* photo too large or unreadable -- still save text fields */
+      }
+    }
+    await saveFormDraft(draft);
+  }
+
+  function schedulePersistDraft() {
+    if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = window.setTimeout(() => {
+      void persistDraft();
+    }, 400);
+  }
+
+  async function restoreDraft(draft: SavedFormDraft) {
+    skipNextPersistRef.current = true;
+    setContentType(draft.contentType);
+    setCtaType(draft.ctaType);
+    setCapture(draft.capture);
+    setTitle(draft.title);
+    setShortDescription(draft.shortDescription);
+    setLongDescription(draft.longDescription);
+    setQuotedText(draft.quotedText);
+    if (draft.startDate) setStartDate(draft.startDate);
+    if (draft.endDate) setEndDate(draft.endDate);
+    setDateNote(draft.dateNote);
+    setPhotoNote(draft.photoNote);
+    setStatus('idle');
+    setCreatedId(null);
+    const restoredPhoto = await photoFileFromDraft(draft);
+    setPhoto(restoredPhoto);
+    skipNextPersistRef.current = false;
   }
 
   // Wipes the whole form -- only appropriate when starting a genuinely new
@@ -626,6 +879,7 @@ function CapturePanelBody() {
     setPhotoNote('');
     setDateNote('');
     setStatus('idle');
+    setSuccessNote('');
     setCreatedId(null);
   }
 
@@ -686,7 +940,7 @@ function CapturePanelBody() {
         const resp = await fetch(resolved.imageUrl);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const blob = await resp.blob();
-        setPhoto(new File([blob], 'captured-image', { type: blob.type || 'image/jpeg' }));
+        setPhoto(new File([blob], 'photo.jpg', { type: blob.type || 'image/jpeg' }));
         setPhotoNote('');
       } catch {
         setPhotoNote("Couldn't auto-fetch that image (likely blocked cross-origin) — attach it manually below.");
@@ -697,6 +951,11 @@ function CapturePanelBody() {
   // Only for a genuinely fresh session: reset everything, then pull in whatever
   // capture is pending (or fall back to a page-level capture of the active tab).
   async function loadFresh() {
+    const savedDraft = await loadFormDraft(org.customerSlug, org.tenantSlug);
+    if (savedDraft) {
+      await restoreDraft(savedDraft);
+      return;
+    }
     resetForm();
     const staged = await takePendingCapture();
     const resolved = staged ?? (await getActiveTabCapture());
@@ -726,16 +985,46 @@ function CapturePanelBody() {
     return () => chrome.storage.onChanged.removeListener(handleStorageChange);
   }, []);
 
+  useEffect(() => {
+    schedulePersistDraft();
+    return () => {
+      if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    org.customerSlug,
+    org.tenantSlug,
+    contentType,
+    ctaType,
+    title,
+    shortDescription,
+    longDescription,
+    quotedText,
+    startDate,
+    endDate,
+    dateNote,
+    photoNote,
+    capture,
+    photoFile,
+  ]);
+
   async function handleSave() {
     setStatus('saving');
     setErrorMsg('');
     try {
-      // Generated fresh here instead of held in state -- it only needs to exist
-      // for the moment of upload, so no capture along the way has to worry about
-      // resetting or preserving it.
-      const stagingId = crypto.randomUUID();
+      let stagingId: string | undefined;
+      let photoWarning = '';
       if (photoFile) {
-        await uploadStagingPhoto(contentType, stagingId, photoFile, photoFile.name || 'photo.jpg');
+        stagingId = crypto.randomUUID();
+        try {
+          await uploadStagingPhoto(contentType, stagingId, photoFile, photoFile.name || 'photo.jpg');
+        } catch (err) {
+          photoWarning =
+            err instanceof Error
+              ? `Photo upload failed (${err.message}). Saving the draft without the photo — you can add it in the admin dashboard.`
+              : 'Photo upload failed. Saving the draft without the photo.';
+          stagingId = undefined;
+        }
       }
       const typeLabel = CONTENT_TYPE_LABELS[contentType].toLowerCase();
       const result = await createDraft(contentType, {
@@ -743,7 +1032,7 @@ function CapturePanelBody() {
         shortDescription: truncate(shortDescription.trim(), SHORT_DESCRIPTION_MAX) || undefined,
         longDescription: longDescription.trim() || undefined,
         isActive: false,
-        stagingId: photoFile ? stagingId : undefined,
+        stagingId,
         ...(showDateFields
           ? {
               startDate: new Date(startDate).toISOString(),
@@ -753,8 +1042,18 @@ function CapturePanelBody() {
         ...(contentType === 'cta' ? { type: ctaType } : {}),
       });
       setCreatedId(result.id ?? null);
+      await clearFormDraft();
+      if (photoWarning) {
+        setSuccessNote(photoWarning);
+      } else {
+        setSuccessNote('');
+      }
       setStatus('success');
     } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        onSessionExpired();
+        return;
+      }
       setErrorMsg(err instanceof Error ? err.message : String(err));
       setStatus('error');
     }
@@ -766,6 +1065,7 @@ function CapturePanelBody() {
         <div className="success-check">✓</div>
         <p className="success-title">{CONTENT_TYPE_LABELS[contentType]} saved as a draft</p>
         <p className="success-sub">id {createdId ?? '(unknown)'}</p>
+        {successNote && <p className="helper-text" style={{ marginTop: 12 }}>{successNote}</p>}
         <button className="btn-secondary" style={{ marginTop: 0 }} onClick={loadFresh}>
           Capture another
         </button>

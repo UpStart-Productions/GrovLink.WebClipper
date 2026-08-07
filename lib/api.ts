@@ -1,8 +1,29 @@
 import { ADMIN_BASE_URL, API_BASE } from './config';
+import { AuthRequiredError, notifyAuthExpired } from './authSession';
 import { getDevCreds } from './devAuth';
 import { getValidIdToken } from './cognitoAuth';
 import { getOrgContext } from './orgContext';
 import { CONTENT_BASE_PATH, CONTENT_KINDS, CONTENT_LIST_KEY, ContentKind } from './contentTypes';
+
+const ALLOWED_PHOTO_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+export function normalizePhotoFile(file: File): File {
+  let mime = file.type;
+  if (!mime || mime === 'application/octet-stream') {
+    mime = 'image/jpeg';
+  }
+  if (!ALLOWED_PHOTO_MIMES.includes(mime)) {
+    throw new Error('Invalid photo type. Use PNG, JPEG, GIF, or WebP.');
+  }
+  let name = file.name?.trim() || 'photo';
+  if (!/\.\w+$/.test(name)) {
+    const ext =
+      mime === 'image/png' ? '.png' : mime === 'image/gif' ? '.gif' : mime === 'image/webp' ? '.webp' : '.jpg';
+    name = `${name}${ext}`;
+  }
+  if (file.type === mime && file.name === name) return file;
+  return new File([file], name, { type: mime });
+}
 
 // Real Cognito login takes priority when both are present -- that shouldn't
 // normally happen (App.tsx only ever sets up one at a time and "switch"
@@ -20,7 +41,10 @@ async function authHeadersRaw(): Promise<Record<string, string>> {
     };
   }
   const creds = await getDevCreds();
-  if (!creds) throw new Error('Not signed in yet.');
+  if (!creds) {
+    notifyAuthExpired();
+    throw new AuthRequiredError('Not signed in yet. Please sign in again.');
+  }
   return {
     'x-user-email': creds.email,
     'x-customer-slug': creds.customerSlug,
@@ -81,8 +105,10 @@ export async function uploadStagingPhoto(
   file: Blob,
   filename: string,
 ): Promise<{ url: string }> {
+  const normalized = file instanceof File ? normalizePhotoFile(file) : file;
+  const uploadName = normalized instanceof File ? normalized.name : filename;
   const form = new FormData();
-  form.append('file', file, filename);
+  form.append('file', normalized, uploadName);
   const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}/staging/${stagingId}/photo`, {
     method: 'POST',
     // No content-type here -- fetch sets multipart/form-data with the right
