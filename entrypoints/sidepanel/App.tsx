@@ -636,7 +636,7 @@ const SHORT_DESCRIPTION_MAX = 200;
 // its own line once selected). Collapse those to spaces before anything else
 // touches the text, so it doesn't show up with odd mid-sentence breaks.
 function toSingleLine(text: string): string {
-  return text.replace(/\s*[\r\n]+\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+  return text.replace(/\0/g, '').replace(/\s*[\r\n]+\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 // The backend caps shortDescription at 200 chars on every content type (all
@@ -650,7 +650,7 @@ function truncate(text: string, max: number): string {
 }
 
 function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text.replace(/\0/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // Plain captured text carries its line breaks as literal "\n" characters, but
@@ -900,7 +900,7 @@ function CapturePanelBody({
     setCapture(resolved);
     setStatus('idle');
     setCreatedId(null);
-    setTitle((prev) => prev || resolved.pageTitle || '');
+    setTitle((prev) => prev || (resolved.pageTitle || '').replace(/\0/g, ''));
 
     // Structured schema.org/Event data straight from the page (see content.ts)
     // is exact and unambiguous -- prefer it over guessing from free text

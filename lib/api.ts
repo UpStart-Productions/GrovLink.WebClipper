@@ -7,6 +7,22 @@ import { CONTENT_BASE_PATH, CONTENT_KINDS, CONTENT_LIST_KEY, ContentKind } from 
 
 const ALLOWED_PHOTO_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
+/** PostgreSQL rejects NUL bytes in text — strip them before any create call. */
+function sanitizeApiText(value: string | undefined): string | undefined {
+  if (value == null) return undefined;
+  const cleaned = value.replace(/\0/g, '');
+  return cleaned.trim() || undefined;
+}
+
+function sanitizeCreateDraftInput(input: CreateDraftInput): CreateDraftInput {
+  return {
+    ...input,
+    title: sanitizeApiText(input.title) ?? 'Untitled',
+    shortDescription: sanitizeApiText(input.shortDescription),
+    longDescription: sanitizeApiText(input.longDescription),
+  };
+}
+
 export function normalizePhotoFile(file: File): File {
   let mime = file.type;
   if (!mime || mime === 'application/octet-stream') {
@@ -86,10 +102,11 @@ export interface CreateDraftInput {
 // later "approval" step (see fetchDrafts/approveDraft below) free instead of a
 // feature we have to build.
 export async function createDraft(kind: ContentKind, input: CreateDraftInput) {
+  const payload = sanitizeCreateDraftInput(input);
   const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}`, {
     method: 'POST',
     headers: await authHeaders(),
-    body: JSON.stringify({ ...input, isActive: input.isActive ?? false }),
+    body: JSON.stringify({ ...payload, isActive: payload.isActive ?? false }),
   });
   await throwIfNotOk(res);
   return res.json();
