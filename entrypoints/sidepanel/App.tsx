@@ -749,14 +749,20 @@ function MainPanel({
         </div>
       )}
       {/* Capture stays mounted while notifications are open so form work isn't lost. */}
-      <div style={{ display: !showNotifications && tab === 'capture' ? undefined : 'none' }}>
+      <div
+        className="panel-tab-pane"
+        style={{ display: !showNotifications && tab === 'capture' ? undefined : 'none' }}
+      >
         <CapturePanelBody
           key={`${org.customerSlug}:${org.tenantSlug}`}
           org={org}
           onSessionExpired={onSessionExpired}
         />
       </div>
-      <div style={{ display: !showNotifications && tab === 'queue' ? undefined : 'none' }}>
+      <div
+        className="panel-tab-pane"
+        style={{ display: !showNotifications && tab === 'queue' ? undefined : 'none' }}
+      >
         <QueuePanel key={`${org.customerSlug}:${org.tenantSlug}`} />
       </div>
     </div>
