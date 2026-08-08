@@ -21,6 +21,8 @@ import {
 } from '../../lib/formDraft';
 import { getViewedNotificationIds, markNotificationViewedLocally } from '../../lib/notificationViews';
 import { CapturePayload, getActiveTabCapture, takePendingCapture } from '../../lib/capture';
+import { API_ENV_LABEL, API_HOST_LABEL } from '../../lib/config';
+import { sanitizeTextForDb, truncateForDb } from '../../lib/sanitizeText';
 import {
   CONTENT_KINDS,
   CONTENT_TYPE_LABELS,
@@ -636,21 +638,21 @@ const SHORT_DESCRIPTION_MAX = 200;
 // its own line once selected). Collapse those to spaces before anything else
 // touches the text, so it doesn't show up with odd mid-sentence breaks.
 function toSingleLine(text: string): string {
-  return text.replace(/\0/g, '').replace(/\s*[\r\n]+\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+  return sanitizeTextForDb(text).replace(/\s*[\r\n]+\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 // The backend caps shortDescription at 200 chars on every content type (all
 // four *CreateDto classes have the same @MaxLength(200)) but has no limit on
 // longDescription. A selected sentence or paragraph easily blows past 200, so
 // it goes in full into longDescription, with a capped single-line preview here.
+// Uses code-point truncation so emoji near the limit don't split into lone
+// surrogates (which PostgreSQL rejects and surfaces as a 500).
 function truncate(text: string, max: number): string {
-  const singleLine = toSingleLine(text);
-  if (singleLine.length <= max) return singleLine;
-  return `${singleLine.slice(0, max - 1).trimEnd()}…`;
+  return truncateForDb(text, max);
 }
 
 function escapeHtml(text: string): string {
-  return text.replace(/\0/g, '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return sanitizeTextForDb(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // Plain captured text carries its line breaks as literal "\n" characters, but
@@ -725,6 +727,14 @@ function MainPanel({
         unreadCount={unreadCount}
         onOpenNotifications={() => setShowNotifications(true)}
       />
+      <div
+        className={`api-env-bar${import.meta.env.WXT_API_ENV === 'production' ? '' : ' dev'}`}
+        title={`Save sends data to ${API_HOST_LABEL}`}
+      >
+        {import.meta.env.WXT_API_ENV === 'production'
+          ? `Connected to ${API_HOST_LABEL}`
+          : `${API_ENV_LABEL} — saves go to ${API_HOST_LABEL}, not app.grovlink.com`}
+      </div>
       {showNotifications ? (
         <NotificationsPanel
           key={`${org.customerSlug}:${org.tenantSlug}`}
@@ -797,7 +807,6 @@ function CapturePanelBody({
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const [successNote, setSuccessNote] = useState('');
-  const [createdId, setCreatedId] = useState<string | null>(null);
 
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
@@ -865,7 +874,6 @@ function CapturePanelBody({
     setDateNote(draft.dateNote);
     setPhotoNote(draft.photoNote);
     setStatus('idle');
-    setCreatedId(null);
     const restoredPhoto = await photoFileFromDraft(draft);
     setPhoto(restoredPhoto);
     skipNextPersistRef.current = false;
@@ -886,7 +894,6 @@ function CapturePanelBody({
     setDateNote('');
     setStatus('idle');
     setSuccessNote('');
-    setCreatedId(null);
   }
 
   // Merges one incoming capture into whatever's already in the form, touching
@@ -899,8 +906,7 @@ function CapturePanelBody({
     if (!resolved) return;
     setCapture(resolved);
     setStatus('idle');
-    setCreatedId(null);
-    setTitle((prev) => prev || (resolved.pageTitle || '').replace(/\0/g, ''));
+    setTitle((prev) => prev || sanitizeTextForDb(resolved.pageTitle || ''));
 
     // Structured schema.org/Event data straight from the page (see content.ts)
     // is exact and unambiguous -- prefer it over guessing from free text
@@ -919,15 +925,16 @@ function CapturePanelBody({
     }
 
     if (resolved.kind === 'selection' && resolved.text) {
-      setQuotedText(resolved.text);
-      setShortDescription(truncate(resolved.text, SHORT_DESCRIPTION_MAX));
-      setLongDescription(textToHtml(resolved.text));
+      const cleanText = sanitizeTextForDb(resolved.text);
+      setQuotedText(cleanText);
+      setShortDescription(truncate(cleanText, SHORT_DESCRIPTION_MAX));
+      setLongDescription(textToHtml(cleanText));
 
       // Only fall back to free-text guessing when the page didn't already
       // hand us an exact structured date -- it's strictly less reliable, and
       // real page text has plenty of ways to fool it (see dateParse.ts).
       if (!usedStructuredDate) {
-        const parsed = parseDateRange(resolved.text);
+        const parsed = parseDateRange(cleanText);
         if (parsed) {
           setStartDate(toDateTimeLocal(parsed.start));
           setEndDate(toDateTimeLocal(parsed.end));
@@ -1033,10 +1040,10 @@ function CapturePanelBody({
         }
       }
       const typeLabel = CONTENT_TYPE_LABELS[contentType].toLowerCase();
-      const result = await createDraft(contentType, {
-        title: title.trim() || `Untitled ${typeLabel}`,
+      await createDraft(contentType, {
+        title: sanitizeTextForDb(title.trim()) || `Untitled ${typeLabel}`,
         shortDescription: truncate(shortDescription.trim(), SHORT_DESCRIPTION_MAX) || undefined,
-        longDescription: longDescription.trim() || undefined,
+        longDescription: sanitizeTextForDb(longDescription.trim()) || undefined,
         isActive: false,
         stagingId,
         ...(showDateFields
@@ -1047,7 +1054,6 @@ function CapturePanelBody({
           : {}),
         ...(contentType === 'cta' ? { type: ctaType } : {}),
       });
-      setCreatedId(result.id ?? null);
       await clearFormDraft();
       if (photoWarning) {
         setSuccessNote(photoWarning);
@@ -1070,9 +1076,8 @@ function CapturePanelBody({
       <div className="success-wrap">
         <div className="success-check">✓</div>
         <p className="success-title">{CONTENT_TYPE_LABELS[contentType]} saved as a draft</p>
-        <p className="success-sub">id {createdId ?? '(unknown)'}</p>
         {successNote && <p className="helper-text" style={{ marginTop: 12 }}>{successNote}</p>}
-        <button className="btn-secondary" style={{ marginTop: 0 }} onClick={loadFresh}>
+        <button className="btn-secondary success-action" onClick={loadFresh}>
           Capture another
         </button>
       </div>

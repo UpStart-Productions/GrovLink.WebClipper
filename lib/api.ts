@@ -1,26 +1,31 @@
-import { ADMIN_BASE_URL, API_BASE } from './config';
+import { ADMIN_BASE_URL, API_BASE, API_HOST_LABEL } from './config';
 import { AuthRequiredError, notifyAuthExpired } from './authSession';
 import { getDevCreds } from './devAuth';
 import { getValidIdToken } from './cognitoAuth';
 import { getOrgContext } from './orgContext';
 import { CONTENT_BASE_PATH, CONTENT_KINDS, CONTENT_LIST_KEY, ContentKind } from './contentTypes';
+import { sanitizeOptionalText } from './sanitizeText';
 
 const ALLOWED_PHOTO_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
-/** PostgreSQL rejects NUL bytes in text — strip them before any create call. */
-function sanitizeApiText(value: string | undefined): string | undefined {
-  if (value == null) return undefined;
-  const cleaned = value.replace(/\0/g, '');
-  return cleaned.trim() || undefined;
-}
-
-function sanitizeCreateDraftInput(input: CreateDraftInput): CreateDraftInput {
-  return {
-    ...input,
-    title: sanitizeApiText(input.title) ?? 'Untitled',
-    shortDescription: sanitizeApiText(input.shortDescription),
-    longDescription: sanitizeApiText(input.longDescription),
+/** Only send fields each admin *CreateDto accepts — extra keys are rejected (400/500). */
+function buildCreatePayload(kind: ContentKind, input: CreateDraftInput): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    title: sanitizeOptionalText(input.title) ?? 'Untitled',
+    isActive: input.isActive ?? false,
   };
+  const shortDescription = sanitizeOptionalText(input.shortDescription);
+  const longDescription = sanitizeOptionalText(input.longDescription);
+  if (shortDescription) payload.shortDescription = shortDescription;
+  if (longDescription) payload.longDescription = longDescription;
+  const stagingId = input.stagingId?.trim();
+  if (stagingId) payload.stagingId = stagingId;
+  if (kind === 'event' || kind === 'cta') {
+    if (input.startDate) payload.startDate = input.startDate;
+    if (input.endDate) payload.endDate = input.endDate;
+  }
+  if (kind === 'cta' && input.type) payload.type = input.type;
+  return payload;
 }
 
 export function normalizePhotoFile(file: File): File {
@@ -75,7 +80,27 @@ async function authHeaders(): Promise<Record<string, string>> {
 async function throwIfNotOk(res: Response): Promise<void> {
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${res.statusText}${body ? ` — ${body}` : ''}`);
+    const headerRequestId = res.headers.get('x-request-id')?.trim();
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body) as { requestId?: string; message?: string; path?: string };
+      const requestId = parsed.requestId ?? headerRequestId;
+      const parts = [`${res.status} ${parsed.message ?? res.statusText}`];
+      if (requestId) parts.push(`requestId ${requestId}`);
+      if (parsed.path) parts.push(parsed.path);
+      parts.push(`(${API_HOST_LABEL})`);
+      detail = parts.join(' — ');
+    } catch {
+      const requestPart = headerRequestId ? ` — requestId ${headerRequestId}` : '';
+      detail = `${res.status} ${res.statusText}${requestPart}${body ? ` — ${body}` : ''} (${API_HOST_LABEL})`;
+    }
+    console.error('[GrovLink clipper] API error', {
+      status: res.status,
+      url: res.url,
+      requestId: headerRequestId,
+      body,
+    });
+    throw new Error(detail);
   }
 }
 
@@ -102,11 +127,13 @@ export interface CreateDraftInput {
 // later "approval" step (see fetchDrafts/approveDraft below) free instead of a
 // feature we have to build.
 export async function createDraft(kind: ContentKind, input: CreateDraftInput) {
-  const payload = sanitizeCreateDraftInput(input);
-  const res = await fetch(`${API_BASE}${CONTENT_BASE_PATH[kind]}`, {
+  const payload = buildCreatePayload(kind, input);
+  const url = `${API_BASE}${CONTENT_BASE_PATH[kind]}`;
+  console.info('[GrovLink clipper] createDraft', { kind, url, payload });
+  const res = await fetch(url, {
     method: 'POST',
     headers: await authHeaders(),
-    body: JSON.stringify({ ...payload, isActive: payload.isActive ?? false }),
+    body: JSON.stringify(payload),
   });
   await throwIfNotOk(res);
   return res.json();
