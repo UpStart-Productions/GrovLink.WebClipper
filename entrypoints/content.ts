@@ -1,3 +1,8 @@
+import {
+  CLIPPER_LOGGED_IN_KEY,
+  SELECTION_BUBBLE_ENABLED_KEY,
+} from '../lib/selectionBubble';
+
 interface StructuredEventData {
   startDate?: string;
   endDate?: string;
@@ -9,10 +14,6 @@ function isEventType(type: unknown): boolean {
   return false;
 }
 
-// JSON-LD often wraps the real content in an array, or in an @graph list
-// (Google's recommended pattern for pages with multiple structured blocks) --
-// walk a few levels deep (capped, since this is arbitrary third-party JSON)
-// looking for the first node whose @type is (or includes) "Event".
 function findEventNode(node: unknown, depth: number): Record<string, unknown> | null {
   if (depth > 4 || node == null || typeof node !== 'object') return null;
   if (Array.isArray(node)) {
@@ -30,12 +31,6 @@ function findEventNode(node: unknown, depth: number): Record<string, unknown> | 
   return null;
 }
 
-// Most event listing platforms (Eventbrite, Facebook Events, Meetup,
-// WordPress/Squarespace event plugins) embed schema.org/Event data as JSON-LD
-// for SEO -- exact ISO date strings, no natural-language ambiguity. Reading
-// this directly is far more reliable than trying to parse a date back out of
-// the rendered page text, so the side panel tries this first and only falls
-// back to chrono-node text parsing when a page doesn't have it.
 function extractEventSchema(): StructuredEventData | null {
   const scripts = document.querySelectorAll('script[type="application/ld+json"]');
   for (const script of Array.from(scripts)) {
@@ -55,18 +50,39 @@ function extractEventSchema(): StructuredEventData | null {
   return null;
 }
 
-// This is the whole point of the extension, per the strategy brief: a floating
-// action that appears the instant you select text, with no need to open a panel
-// first. Pinterest's clipper doesn't have this -- it only works page-level.
 export default defineContentScript({
   matches: ['<all_urls>'],
   main() {
     let bubble: HTMLDivElement | null = null;
     let repositionScheduled = false;
+    let bubbleEnabled = true;
+    let clipperLoggedIn = false;
+    /** User dismissed the bubble for this exact selection text until they highlight again. */
+    let dismissedSelectionText: string | null = null;
 
-    // Answers the side panel's / background script's request for this page's
-    // structured event data (see requestStructuredEventData() in lib/capture.ts).
-    // Synchronous, so no need to return true / keep the message channel open.
+    async function refreshBubbleSettings(): Promise<void> {
+      const stored = await chrome.storage.local.get([
+        SELECTION_BUBBLE_ENABLED_KEY,
+        CLIPPER_LOGGED_IN_KEY,
+      ]);
+      bubbleEnabled = stored[SELECTION_BUBBLE_ENABLED_KEY] !== false;
+      clipperLoggedIn = !!stored[CLIPPER_LOGGED_IN_KEY];
+    }
+
+    void refreshBubbleSettings();
+
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (changes[SELECTION_BUBBLE_ENABLED_KEY]) {
+        bubbleEnabled = changes[SELECTION_BUBBLE_ENABLED_KEY].newValue !== false;
+        if (!bubbleEnabled) removeBubble();
+      }
+      if (changes[CLIPPER_LOGGED_IN_KEY]) {
+        clipperLoggedIn = !!changes[CLIPPER_LOGGED_IN_KEY].newValue;
+        if (!clipperLoggedIn) removeBubble();
+      }
+    });
+
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type === 'gl-get-structured-event-data') {
         sendResponse(extractEventSchema());
@@ -84,8 +100,6 @@ export default defineContentScript({
       bubble.style.top = `${Math.max(8, rect.top - 42)}px`;
     }
 
-    // Null when there's no selection worth showing a bubble for (too short,
-    // or the range has zero size -- e.g. a collapsed cursor with no drag).
     function currentSelectionRect(): DOMRect | null {
       const sel = window.getSelection();
       const text = sel?.toString().trim() ?? '';
@@ -95,6 +109,10 @@ export default defineContentScript({
       return rect;
     }
 
+    function canShowBubble(): boolean {
+      return clipperLoggedIn && bubbleEnabled;
+    }
+
     function showBubble(rect: DOMRect, text: string) {
       removeBubble();
       bubble = document.createElement('div');
@@ -102,20 +120,36 @@ export default defineContentScript({
         position: 'fixed',
         display: 'flex',
         alignItems: 'center',
-        gap: '7px',
+        gap: '6px',
         background: '#1f2937',
         border: '1px solid rgba(121, 182, 72, 0.55)',
         color: '#ffffff',
-        padding: '6px 14px 6px 8px',
+        padding: '6px 8px 6px 8px',
         borderRadius: '20px',
         fontSize: '12px',
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         fontWeight: '600',
         lineHeight: '1',
-        cursor: 'pointer',
         zIndex: '2147483647',
         boxShadow: '0 6px 16px rgba(0, 0, 0, 0.25)',
         userSelect: 'none',
+      } as Partial<CSSStyleDeclaration> as any);
+
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.setAttribute('aria-label', 'Send to GrovLink');
+      Object.assign(action.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '7px',
+        background: 'none',
+        border: 'none',
+        color: 'inherit',
+        font: 'inherit',
+        fontWeight: 'inherit',
+        cursor: 'pointer',
+        padding: '0',
+        margin: '0',
       } as Partial<CSSStyleDeclaration> as any);
 
       const icon = document.createElement('img');
@@ -131,12 +165,10 @@ export default defineContentScript({
       const label = document.createElement('span');
       label.textContent = 'Send to GrovLink';
 
-      bubble.appendChild(icon);
-      bubble.appendChild(label);
-      positionBubble(rect);
+      action.appendChild(icon);
+      action.appendChild(label);
 
-      bubble.addEventListener('mousedown', (e) => {
-        // Prevent the click from collapsing the selection before we read it.
+      action.addEventListener('mousedown', (e) => {
         e.preventDefault();
         e.stopPropagation();
         const structured = extractEventSchema();
@@ -154,25 +186,70 @@ export default defineContentScript({
         removeBubble();
       });
 
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.setAttribute('aria-label', 'Dismiss Send to GrovLink');
+      closeBtn.textContent = '×';
+      Object.assign(closeBtn.style, {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: '20px',
+        height: '20px',
+        flexShrink: '0',
+        background: 'none',
+        border: 'none',
+        color: 'rgba(255, 255, 255, 0.8)',
+        cursor: 'pointer',
+        fontSize: '17px',
+        lineHeight: '1',
+        padding: '0',
+        margin: '0 0 0 2px',
+        borderRadius: '50%',
+      } as Partial<CSSStyleDeclaration> as any);
+
+      closeBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dismissedSelectionText = text;
+        removeBubble();
+      });
+
+      bubble.appendChild(action);
+      bubble.appendChild(closeBtn);
+      positionBubble(rect);
       document.body.appendChild(bubble);
     }
 
-    document.addEventListener('selectionchange', () => {
+    function handleSelectionChange() {
       const rect = currentSelectionRect();
       if (!rect) {
         removeBubble();
+        dismissedSelectionText = null;
         return;
       }
-      showBubble(rect, window.getSelection()!.toString().trim());
+
+      const text = window.getSelection()?.toString().trim() ?? '';
+      if (!canShowBubble()) {
+        removeBubble();
+        return;
+      }
+      if (dismissedSelectionText === text) {
+        removeBubble();
+        return;
+      }
+
+      showBubble(rect, text);
+    }
+
+    document.addEventListener('selectionchange', () => {
+      void refreshBubbleSettings().then(handleSelectionChange);
     });
 
     document.addEventListener('mousedown', (e) => {
-      if (bubble && e.target !== bubble) removeBubble();
+      if (bubble && !bubble.contains(e.target as Node)) removeBubble();
     });
 
-    // Scrolling shouldn't dismiss the bubble on its own -- only the selection
-    // clearing should. Follow the selection's new position each frame instead;
-    // only remove it if the selection itself is actually gone.
     window.addEventListener(
       'scroll',
       () => {

@@ -45,26 +45,92 @@ body {
   justify-content: space-between;
 }
 
-.api-env-bar {
-  padding: 6px 15px;
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--text-secondary);
-  background: var(--surface-muted, #f4f4f5);
-  border-bottom: 1px solid var(--border);
-}
-
-.api-env-bar.dev {
-  color: #92400e;
-  background: #fef3c7;
-  border-bottom-color: #fcd34d;
-  font-weight: 600;
-}
-
 .header-actions {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.icon-button.power-toggle.active {
+  color: var(--gl-green-dark);
+}
+
+.icon-button.power-toggle.active:hover {
+  background: var(--gl-green-bg);
+  color: var(--gl-green-dark);
+}
+
+.icon-button.power-toggle.inactive {
+  color: #c4c4c4;
+}
+
+.icon-button.power-toggle.inactive:hover {
+  background: #f3f4f6;
+  color: #9ca3af;
+}
+
+.hover-tooltip-trigger {
+  display: inline-flex;
+  line-height: 0;
+}
+
+.hover-tooltip {
+  position: fixed;
+  z-index: 2147483646;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: #fff;
+  background: #334155;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.28);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.hover-tooltip--top {
+  transform: translate(-50%, -100%);
+}
+
+.hover-tooltip--bottom {
+  transform: translate(-50%, 0);
+}
+
+.photo-drop-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 88px;
+  padding: 16px 12px;
+  border: 1.5px dashed var(--border);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.photo-drop-zone:hover,
+.photo-drop-zone--active {
+  border-color: var(--gl-green);
+  background: var(--gl-green-bg);
+}
+
+.photo-drop-zone-title {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.photo-drop-zone-sub {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
 }
 
 .bell-button {

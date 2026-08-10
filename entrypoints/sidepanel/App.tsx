@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ExternalLink, LogOut, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ExternalLink, LogOut, Power, RefreshCw } from 'lucide-react';
 import { AuthRequiredError, setAuthExpiredHandler } from '../../lib/authSession';
 import { DevCreds, clearDevCreds, getDevCreds, setDevCreds } from '../../lib/devAuth';
 import {
@@ -21,7 +21,12 @@ import {
 } from '../../lib/formDraft';
 import { getViewedNotificationIds, markNotificationViewedLocally } from '../../lib/notificationViews';
 import { CapturePayload, getActiveTabCapture, takePendingCapture } from '../../lib/capture';
-import { API_ENV_LABEL, API_HOST_LABEL } from '../../lib/config';
+import {
+  getSelectionBubbleEnabled,
+  SELECTION_BUBBLE_ENABLED_KEY,
+  setClipperLoggedIn,
+  setSelectionBubbleEnabled,
+} from '../../lib/selectionBubble';
 import { sanitizeTextForDb, truncateForDb } from '../../lib/sanitizeText';
 import {
   CONTENT_KINDS,
@@ -48,6 +53,8 @@ import {
 } from '../../lib/api';
 import { formatDateRangeLabel, parseDateRange, toDateTimeLocal, withDefaultEnd } from '../../lib/dateParse';
 import RichTextEditor from './RichTextEditor';
+import HoverTooltip from './HoverTooltip';
+import PhotoDropZone from './PhotoDropZone';
 
 type Screen = 'loading' | 'login' | 'org-picker' | 'capture';
 
@@ -109,6 +116,11 @@ export default function App() {
   }, [handleSessionExpired]);
 
   useEffect(() => {
+    const loggedIn = screen === 'capture' || screen === 'org-picker';
+    void setClipperLoggedIn(loggedIn);
+  }, [screen]);
+
+  useEffect(() => {
     (async () => {
       if (await hasCognitoSession()) {
         setAuthMode('cognito');
@@ -142,6 +154,7 @@ export default function App() {
 
   async function handleSwitchOrg() {
     await clearFormDraft();
+    await setClipperLoggedIn(false);
     if (authMode === 'cognito') {
       await signOutCognito();
       await clearOrgContext();
@@ -727,14 +740,6 @@ function MainPanel({
         unreadCount={unreadCount}
         onOpenNotifications={() => setShowNotifications(true)}
       />
-      <div
-        className={`api-env-bar${import.meta.env.WXT_API_ENV === 'production' ? '' : ' dev'}`}
-        title={`Save sends data to ${API_HOST_LABEL}`}
-      >
-        {import.meta.env.WXT_API_ENV === 'production'
-          ? `Connected to ${API_HOST_LABEL}`
-          : `${API_ENV_LABEL} — saves go to ${API_HOST_LABEL}, not app.grovlink.com`}
-      </div>
       {showNotifications ? (
         <NotificationsPanel
           key={`${org.customerSlug}:${org.tenantSlug}`}
@@ -1152,12 +1157,7 @@ function CapturePanelBody({
             </div>
           ) : (
             <>
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/gif,image/webp"
-                className="field-input"
-                onChange={(e) => setPhoto(e.target.files?.[0] ?? null)}
-              />
+              <PhotoDropZone onFile={setPhoto} />
               {photoNote && <p className="helper-text" style={{ marginTop: 6, textAlign: 'left' }}>{photoNote}</p>}
             </>
           )}
@@ -1388,14 +1388,57 @@ function PanelHeader({
   unreadCount: number | null;
   onOpenNotifications: () => void;
 }) {
+  const [selectionBubbleEnabled, setSelectionBubbleEnabledState] = useState(true);
+
+  useEffect(() => {
+    void getSelectionBubbleEnabled().then(setSelectionBubbleEnabledState);
+    function onStorageChange(changes: Record<string, chrome.storage.StorageChange>, area: string) {
+      if (area !== 'local' || !changes[SELECTION_BUBBLE_ENABLED_KEY]) return;
+      setSelectionBubbleEnabledState(changes[SELECTION_BUBBLE_ENABLED_KEY].newValue !== false);
+    }
+    chrome.storage.onChanged.addListener(onStorageChange);
+    return () => chrome.storage.onChanged.removeListener(onStorageChange);
+  }, []);
+
+  async function toggleSelectionBubble() {
+    const next = !selectionBubbleEnabled;
+    await setSelectionBubbleEnabled(next);
+    setSelectionBubbleEnabledState(next);
+  }
+
   return (
     <div className="panel-header">
       <OrgSwitcherPill org={org} authMode={authMode} onOrgChange={onOrgChange} />
       <div className="header-actions">
-        <NotificationBell count={unreadCount} onClick={onOpenNotifications} />
-        <button type="button" className="icon-button" onClick={onSwitchOrg} aria-label="Log out" title="Log out">
-          <LogOut size={17} strokeWidth={2} />
-        </button>
+        <HoverTooltip
+          label={selectionBubbleEnabled ? 'Send to GrovLink button: On' : 'Send to GrovLink button: Off'}
+        >
+          <button
+            type="button"
+            className={`icon-button power-toggle${selectionBubbleEnabled ? ' active' : ' inactive'}`}
+            onClick={() => void toggleSelectionBubble()}
+            aria-label={
+              selectionBubbleEnabled
+                ? 'Send to GrovLink button is on'
+                : 'Send to GrovLink button is off'
+            }
+          >
+            <Power size={17} strokeWidth={2} />
+          </button>
+        </HoverTooltip>
+        <HoverTooltip label="Notifications">
+          <NotificationBell count={unreadCount} onClick={onOpenNotifications} />
+        </HoverTooltip>
+        <HoverTooltip label="Log out">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onSwitchOrg}
+            aria-label="Log out"
+          >
+            <LogOut size={17} strokeWidth={2} />
+          </button>
+        </HoverTooltip>
       </div>
     </div>
   );
@@ -1406,7 +1449,12 @@ function PanelHeader({
 // rather than flashing a 0 before the first fetch resolves.
 function NotificationBell({ count, onClick }: { count: number | null; onClick: () => void }) {
   return (
-    <button type="button" className="bell-button" onClick={onClick} aria-label="Notifications">
+    <button
+      type="button"
+      className="bell-button"
+      onClick={onClick}
+      aria-label="Notifications"
+    >
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
         <path d="M13.73 21a2 2 0 0 1-3.46 0" />
