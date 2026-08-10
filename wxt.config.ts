@@ -20,7 +20,7 @@ export default defineConfig({
         : 'GrovLink Web Clipper (local API)',
     description:
       'Capture events, calls to action, classes, and impact stories from any webpage and send them to GrovLink as drafts for approval.',
-    version: '1.0.2',
+    version: '1.0.3',
     // Dev key pins a stable extension ID for Cognito OAuth during unpacked
     // testing. Omitted only for Chrome Web Store builds (they assign their own ID).
     ...(isStoreBuild ? {} : { key: DEV_EXTENSION_KEY }),
